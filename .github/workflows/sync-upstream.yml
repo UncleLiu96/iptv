@@ -21,6 +21,10 @@ on:
   push:
     branches: [ master ]
 
+# 核心修复1：显式赋予 GITHUB_TOKEN 写入权限，防止 git push 因权限不足报 128 错误
+permissions:
+  contents: write
+
 jobs:
   sync:
     runs-on: ubuntu-latest
@@ -46,7 +50,6 @@ jobs:
       id: check_changes
       run: |
         UPSTREAM_BRANCH="${{ github.event.inputs.upstream_branch || 'master' }}"
-        CURRENT_BRANCH="master"
         
         # 检查是否有新的提交
         if git diff --quiet HEAD upstream/$UPSTREAM_BRANCH; then
@@ -84,16 +87,14 @@ jobs:
         fi
         
         # 强制同步：以远程仓库为准
-        # 如果有本地修改或冲突，将被上游更改覆盖
         git fetch upstream $UPSTREAM_BRANCH
         
-        # 尝试合并，如果有冲突则强制使用上游版本
-        if ! git merge upstream/$UPSTREAM_BRANCH --no-edit; then
-          echo "检测到合并冲突，强制使用上游版本"
-          # 如果有冲突，强制使用上游版本
-          git checkout --theirs .
-          git add .
-          git commit -m "强制同步：解决合并冲突，使用上游版本"
+        # 核心修复2：使用 -X theirs 策略自动解决冲突，避免复杂的 checkout --theirs 导致的状态混乱
+        # 添加 --allow-unrelated-histories 以防上游仓库历史与当前仓库完全无关
+        if ! git merge upstream/$UPSTREAM_BRANCH --no-edit -X theirs --allow-unrelated-histories; then
+          echo "合并出现严重错误，中止操作"
+          git merge --abort
+          exit 1
         fi
         
         # 恢复工作流文件，避免权限问题
@@ -102,6 +103,13 @@ jobs:
           rm -rf .github/workflows
           mv .github/workflows.backup .github/workflows
           git add .github/workflows/
+        fi
+        
+        # 核心修复3：检查是否有实际变更需要提交，防止空提交导致 exit code 1
+        if ! git diff --cached --quiet; then
+          git commit -m "chore: 强制同步上游更改并保留自定义工作流"
+        else
+          echo "没有需要额外提交的文件变更"
         fi
         
         # 强制推送更改（覆盖任何本地修改）
